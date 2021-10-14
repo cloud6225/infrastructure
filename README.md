@@ -10,12 +10,6 @@ Use Terraform to create following resources:
 - AWS CLI
 - Terraform
 
-## Features
-- Django Rest Framework
-- Rest API's
-- Basic Authentication 
-- Serializer's
-
 ## How to run the project
 - Clone this repo and go inside repo in you local machine
 - Configure IAM user profile in AWS CLI using command
