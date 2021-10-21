@@ -14,3 +14,11 @@ variable "subnet_azs" {
 variable "vpc_name"{
     default = "main"
 }
+
+variable "cidr_block_vpc"{
+  default = "10.0.0.0/16"
+}
+
+variable "cidr_block_route"{
+}
+  default = "0.0.0.0/0"
