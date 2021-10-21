@@ -2,7 +2,7 @@
 
 #creating vpc
 resource "aws_vpc" "main" {
-  cidr_block           = "10.0.0.0/16"
+  cidr_block           = "${var.cidr_block_vpc}"
   enable_dns_hostnames = true
   tags = {
     Name = "main"
@@ -38,7 +38,7 @@ resource "aws_route_table" "routeTable" {
   depends_on = [aws_internet_gateway.gateway]
 
   route {
-      cidr_block = "0.0.0.0/0"
+      cidr_block = "${var.cidr_block_route}"
       gateway_id = "${aws_internet_gateway.gateway.id}"
     }
   
