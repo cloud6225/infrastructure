@@ -56,7 +56,7 @@ resource "aws_route_table_association" "route" {
 
 data "aws_ami" "example_ami" {
   most_recent = true
-  owners      = ["self"]
+  owners      = ["695302741031", "867641324123"]
 }
 
 #app security group
