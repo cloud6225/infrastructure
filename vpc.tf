@@ -71,7 +71,7 @@ resource "aws_security_group" "application" {
       to_port          = 443
       protocol         = "tcp"
       description      = "TLS from VPC"
-      cidr_blocks      = [aws_vpc.main.cidr_block]
+      cidr_blocks      = ["0.0.0.0/0"]
       ipv6_cidr_blocks = []
       prefix_list_ids  = []
       security_groups  = []
@@ -93,7 +93,7 @@ resource "aws_security_group" "application" {
       to_port          = 80
       protocol         = "tcp"
       description      = "HTTP from VPC"
-      cidr_blocks      = [aws_vpc.main.cidr_block]
+      cidr_blocks      = ["0.0.0.0/0"]
       ipv6_cidr_blocks = []
       prefix_list_ids  = []
       security_groups  = []
@@ -163,7 +163,7 @@ resource "aws_security_group" "database" {
       from_port        = 5432
       to_port          = 5432
       protocol         = "tcp"
-      cidr_blocks      = [aws_vpc.main.cidr_block]
+      cidr_blocks      = []
       security_groups  = [aws_security_group.application.id]
       self             = false
       ipv6_cidr_blocks = []
@@ -181,7 +181,7 @@ resource "aws_db_subnet_group" "subnet_group" {
   subnet_ids = aws_subnet.public_subnet.*.id
 
   tags = {
-    Name = "My DB subnet group"
+    Name = "DB subnet group"
   }
 }
 
@@ -233,6 +233,15 @@ resource "aws_s3_bucket" "bucket" {
   }
 }
 
+// resource "aws_s3_bucket_public_access_block" "bucket_access" {
+//   bucket = aws_s3_bucket.bucket.id
+
+//   block_public_acls   = true
+//   block_public_policy = true
+//   ignore_public_acls = true
+//   restrict_public_buckets = true
+// }
+
 #creating IAM role
 resource "aws_iam_role" "role" {
   name = "EC2-CSYE6225"
@@ -273,7 +282,7 @@ resource "aws_iam_policy" "policy" {
               "s3:GetBucketLocation",
               "s3:GetObject",
               "s3:PutObject",
-			  "s3:DeleteObject"
+			        "s3:DeleteObject"
             ],
             "Effect": "Allow",
             "Resource": [
