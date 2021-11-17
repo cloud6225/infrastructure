@@ -63,3 +63,11 @@ variable "ec2_key" {
   description = "ec2 key pair"
 }
 
+variable "aws_profile_name"{
+    type = string
+}
+
+
+variable "domain_Name"{
+    type = string
+}
