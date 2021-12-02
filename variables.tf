@@ -71,3 +71,24 @@ variable "aws_profile_name"{
 variable "domain_Name"{
     type = string
 }
+
+variable "prod_acc"{
+  default = "695302741031"
+}
+
+variable "dynamoDBName"{
+     description = "Enter DynamoDB Name"
+     type = string
+}
+
+variable "fromAddress"{
+  default = "prod.mrudulladhwe.me"
+}
+
+variable "lambdabucket"{
+  default = "lambda.email.bucket"
+}
+
+variable "snstopic"{
+  default = "user-updates-topic"
+}
