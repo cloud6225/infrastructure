@@ -264,6 +264,24 @@ resource "aws_db_instance" "rds_instance" {
   publicly_accessible    = false
   skip_final_snapshot    = true
   vpc_security_group_ids = [aws_security_group.database.id]
+  backup_retention_period= 5
+}
+
+resource "aws_db_instance" "rds_replica" {
+  allocated_storage      = 20
+  depends_on             = [aws_security_group.database, aws_db_parameter_group.parameter_group, aws_db_subnet_group.subnet_group, aws_db_instance.rds_instance]
+  engine                 = "postgres"
+  engine_version         = "13"
+  instance_class         = "db.t3.micro"
+  multi_az               = false
+  identifier             = "rdsreplica"
+  replicate_source_db    = aws_db_instance.rds_instance.arn
+  db_subnet_group_name   = aws_db_subnet_group.subnet_group.name
+  parameter_group_name   = var.db_pg
+  publicly_accessible    = false
+  skip_final_snapshot    = true
+  vpc_security_group_ids = [aws_security_group.database.id]
+  availability_zone      = "us-east-1b"
 }
 
 #creating S3 bucket
@@ -413,7 +431,8 @@ resource "aws_launch_configuration" "as_conf" {
   echo export AWS_S3_BUCKET_NAME="${aws_s3_bucket.bucket.bucket}" >> /etc/environment
   echo export POSTGRES_PORT="${var.port}" >> /etc/environment
   echo export AWS_REGION_NAME="${var.region}" >> /etc/environment
- 
+  echo export AWS_SNS_TOPIC="${var.snstopic}" >> /etc/environment 
+  echo export DB_HOST_REPLICA="${aws_db_instance.rds_replica.address}" >> /etc/environment
   EOF
 
   iam_instance_profile = aws_iam_instance_profile.profile.name
@@ -547,7 +566,7 @@ data "aws_route53_zone" "selected" {
 
 resource "aws_route53_record" "www" {
   zone_id = data.aws_route53_zone.selected.zone_id
-  name    = "api.${data.aws_route53_zone.selected.name}"
+  name    = "${data.aws_route53_zone.selected.name}"
   type    = "A"
   
   alias {
@@ -576,7 +595,8 @@ resource "aws_iam_role_policy" "CodeDeploy_EC2_S3" {
       "Effect": "Allow",
       "Resource": [
         "arn:aws:s3:::codedeploy.${var.aws_profile_name}.${var.domain_Name}/*",
-        "arn:aws:s3:::webapp.${var.aws_profile_name}.${var.domain_Name}/*"
+        "arn:aws:s3:::webapp.${var.aws_profile_name}.${var.domain_Name}/*",
+        "arn:aws:s3:::${var.lambdabucket}/*"
       ]
     }
   ]
@@ -601,7 +621,9 @@ resource "aws_iam_policy" "gh_upload_s3" {
             ],
             "Resource": [
                 "arn:aws:s3:::codedeploy.${var.aws_profile_name}.${var.domain_Name}",
-                "arn:aws:s3:::codedeploy.${var.aws_profile_name}.${var.domain_Name}/*"
+                "arn:aws:s3:::codedeploy.${var.aws_profile_name}.${var.domain_Name}/*",
+                "arn:aws:s3:::${var.lambdabucket}",
+                "arn:aws:s3:::${var.lambdabucket}/*"
               ]
         }
     ]
@@ -783,6 +805,343 @@ resource "aws_iam_user_policy_attachment" "ghactions-app_codedeploy_policy_attac
 resource "aws_iam_role_policy_attachment" "AmazonCloudWatchAgent" {
   role       = aws_iam_role.role.name
   policy_arn = "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy"
+}
+
+#SNS topic
+resource "aws_sns_topic" "sns_topic" {
+  name = "user-updates-topic"
+}
+
+resource "aws_sns_topic_policy" "default" {
+  arn = aws_sns_topic.sns_topic.arn
+  policy = data.aws_iam_policy_document.sns_topic_policy.json
+}
+
+data "aws_iam_policy_document" "sns_topic_policy" {
+
+  statement {
+    actions = [
+      "SNS:Subscribe",
+      "SNS:SetTopicAttributes",
+      "SNS:RemovePermission",
+      "SNS:Receive",
+      "SNS:Publish",
+      "SNS:ListSubscriptionsByTopic",
+      "SNS:GetTopicAttributes",
+      "SNS:DeleteTopic",
+      "SNS:AddPermission"
+    ]
+
+    condition {
+      test     = "StringEquals"
+      variable = "AWS:SourceOwner"
+
+      values = [
+        var.prod_acc,
+      ]
+    }
+
+    effect = "Allow"
+
+    principals {
+      type        = "AWS"
+      identifiers = ["*"]
+    }
+
+    resources = [
+      aws_sns_topic.sns_topic.arn,
+    ]
+  }
+}
+
+resource "aws_iam_policy" "sns_iam_policy" {
+  name = "ec2_iam_policy"
+  policy = <<EOF
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "SNS:Publish"
+      ],
+      "Resource": "${aws_sns_topic.sns_topic.arn}"
+    }
+  ]
+}
+EOF
+}
+
+
+#Role for AWS lambda
+resource "aws_iam_role" "iam_for_lambda" {
+  name = "iam_for_lambda"
+
+  assume_role_policy = <<EOF
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Action": "sts:AssumeRole",
+      "Principal": {
+        "Service": "lambda.amazonaws.com"
+      },
+      "Effect": "Allow",
+      "Sid": ""
+    }
+  ]
+}
+EOF
+}
+
+# Attach the SNS topic policy to the EC2 Role
+resource "aws_iam_role_policy_attachment" "ec2_sns" {
+  policy_arn = aws_iam_policy.sns_iam_policy.arn
+  role = aws_iam_role.role.name
+}
+
+resource "aws_lambda_function" "lambda_function" {
+  filename      = "sendVerifyEmail.zip"
+  function_name = "lambda_email_updates"
+  role          = aws_iam_role.iam_for_lambda.arn
+  handler       = "sendVerifyEmail.lambda_handler"
+
+  # The filebase64sha256() function is available in Terraform 0.11.12 and later
+  # For Terraform 0.11.11 and earlier, use the base64sha256() function and the file() function:
+  # source_code_hash = "${base64sha256(file("sendVerifyEmail.zip"))}"
+  source_code_hash = filebase64sha256("sendVerifyEmail.zip")
+
+  runtime = "python3.8"
+}
+
+resource "aws_cloudwatch_log_group" "lambda_log_group" {
+  name  = "/aws/lambda/${aws_lambda_function.lambda_function.function_name}"
+}
+
+resource "aws_sns_topic_subscription" "lambda" {
+  topic_arn = aws_sns_topic.sns_topic.arn
+  protocol  = "lambda"
+  endpoint  = aws_lambda_function.lambda_function.arn
+}
+
+#Give SNS to access lambda function
+resource "aws_lambda_permission" "allow_cloudwatch" {
+  statement_id  = "AllowExecutionFromSNS"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.lambda_function.function_name
+  principal     = "sns.amazonaws.com"
+  source_arn    = aws_sns_topic.sns_topic.arn
+}
+
+
+# Lambda Policy
+resource "aws_iam_policy" "lambda_policy" {
+  name        = "lambda_policy"
+  description = "Policy for Cloud watch and Code Deploy"
+  policy      = <<EOF
+{
+   "Version": "2012-10-17",
+   "Statement": [
+       {
+           "Effect": "Allow",
+           "Action": "logs:CreateLogGroup",
+           "Resource": "arn:aws:logs:${var.region}:${var.prod_acc}:*"
+       },
+        {
+           "Effect": "Allow",
+           "Action": [
+               "logs:CreateLogStream",
+               "logs:PutLogEvents"
+           ],
+           "Resource": [
+              "arn:aws:logs:${var.region}:${var.prod_acc}:log-group:/aws/lambda/${aws_lambda_function.lambda_function.function_name}:*"
+          ]
+       },
+       {
+         "Sid": "LambdaDynamoDBAccess",
+         "Effect": "Allow",
+         "Action": [
+             "dynamodb:GetItem",
+             "dynamodb:PutItem",
+             "dynamodb:UpdateItem",
+             "dynamodb:Scan",
+             "dynamodb:DeleteItem"
+         ],
+         "Resource": "arn:aws:dynamodb:${var.region}:${var.prod_acc}:table/${var.dynamoDBName}"
+       },
+       {
+         "Sid": "LambdaSESAccess",
+         "Effect": "Allow",
+         "Action": [
+             "ses:VerifyEmailAddress",
+             "ses:SendEmail",
+             "ses:SendRawEmail"
+         ],
+         "Resource": "*"
+       }
+   ]
+}
+ EOF
+}
+
+# Attach the policy for IAM Lambda role
+resource "aws_iam_role_policy_attachment" "lambda_role_policy_attach" {
+  role       = aws_iam_role.iam_for_lambda.name
+  policy_arn = aws_iam_policy.lambda_policy.arn
+}
+
+resource "aws_dynamodb_table" "basic-dynamodb-table" {
+  name           = var.dynamoDBName
+  billing_mode   = "PROVISIONED"
+  read_capacity  = 20
+  write_capacity = 20
+  hash_key       = "UserId"
+
+  attribute {
+    name = "UserId"
+    type = "S"
+  }
+
+  ttl {
+    attribute_name = "TimeToExist"
+    enabled        = true
+  }
+
+  tags = {
+    Name        = "dynamodb-table1"
+    Environment = "production"
+  }
+}
+
+resource "aws_s3_bucket" "lambdabucket" {
+  bucket = "lambda.email.bucket"
+  force_destroy = true
+  acl           = "private"
+
+  lifecycle_rule {
+    enabled = true
+
+    transition {
+      days          = 30
+      storage_class = "STANDARD_IA"
+    }
+  }
+
+  server_side_encryption_configuration {
+    rule {
+      apply_server_side_encryption_by_default {
+        sse_algorithm     = "aws:kms"
+      }
+    }
+  }
+}
+
+resource "aws_s3_bucket_public_access_block" "restrict_access" {
+  bucket = aws_s3_bucket.lambdabucket.id
+
+  block_public_acls   = true
+  block_public_policy = true
+  ignore_public_acls = true
+  restrict_public_buckets = true
+}
+
+resource "aws_iam_policy" "lambda_bucket_policy" {
+    name = "WebAppLambdaS3"
+    description = "ec2 will be able to talk to s3 buckets"
+    policy = <<-EOF
+    {
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Action": [
+              "s3:ListAllMyBuckets", 
+              "s3:GetBucketLocation",
+              "s3:GetObject",
+              "s3:PutObject",
+			  "s3:DeleteObject"
+            ],
+            "Effect": "Allow",
+            "Resource": [
+                "arn:aws:s3:::${aws_s3_bucket.lambdabucket.id}",
+                "arn:aws:s3:::${aws_s3_bucket.lambdabucket.id}/*"
+            ]
+        }
+    ]
+    }
+    EOF
+
+}
+
+resource "aws_iam_role_policy_attachment" "attach_lambda_role_policy" {
+  role       = aws_iam_role.role.name
+  policy_arn = aws_iam_policy.lambda_bucket_policy.arn
+}
+
+resource "aws_iam_policy" "Update-lambda-function" {
+  name        = "Update-lambda-function"
+  description = "Policy to update lambda function"
+  policy      = <<EOF
+{
+ "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Sid": "",
+            "Effect": "Allow",
+            "Action": "lambda:UpdateFunctionCode",
+            "Resource": "arn:aws:lambda:${var.region}:${var.prod_acc}:function:lambda_email_updates"
+        }
+    ] 
+}
+EOF
+}
+
+resource "aws_iam_user_policy_attachment" "Update-lambda-function_policy_attach" {
+  user       = "ghactions-app"
+  policy_arn = "${aws_iam_policy.Update-lambda-function.arn}"
+}
+
+resource "aws_iam_policy" "dynamoDbEc2Policy"{
+  name = "DynamoDb-Ec2"
+  description = "ec2 will be able to talk to dynamodb"
+  policy = <<-EOF
+    {
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Effect": "Allow",
+            "Action": [      
+              "dynamodb:List*",
+              "dynamodb:DescribeReservedCapacity*",
+              "dynamodb:DescribeLimits",
+              "dynamodb:DescribeTimeToLive"
+            ],
+            "Resource": "*"
+        },
+        {
+            "Effect": "Allow",
+            "Action": [
+                "dynamodb:BatchGet*",
+                "dynamodb:DescribeStream",
+                "dynamodb:DescribeTable",
+                "dynamodb:Get*",
+                "dynamodb:Query",
+                "dynamodb:Scan",
+                "dynamodb:BatchWrite*",
+                "dynamodb:CreateTable",
+                "dynamodb:Delete*",
+                "dynamodb:Update*",
+                "dynamodb:PutItem"
+            ],
+            "Resource": "arn:aws:dynamodb:${var.region}:${var.prod_acc}:table/${var.dynamoDBName}"
+        }
+    ]
+    }
+    EOF
+}
+
+resource "aws_iam_role_policy_attachment" "attachDynamoDbPolicyToRole" {
+  role       = aws_iam_role.role.name
+  policy_arn = aws_iam_policy.dynamoDbEc2Policy.arn
 }
 
 
