@@ -23,4 +23,9 @@ Use Terraform to create following resources:
 - Clean up of resources using
   `terraform destroy`
 
+## Import ACM certificate
+- Command to import ACM certificate
+`aws acm import-certificate --certificate fileb://C:/Users/mrudu/Downloads/prod_mrudulladhwe_me/prod_mrudulladhwe_me.crt --certificate-chain fileb://C:/Users/mrudu/Downloads/prod_mrudulladhwe_me/prod_mrudulladhwe_me.ca-bundle --private-key fileb://C:/Users/mrudu/Desktop/ssl/csr.key`
+
+
 

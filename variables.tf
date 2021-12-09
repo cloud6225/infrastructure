@@ -92,3 +92,11 @@ variable "lambdabucket"{
 variable "snstopic"{
   default = "user-updates-topic"
 }
+
+variable "alias" {
+  default     = null
+}
+
+variable "appuser"{
+  default = "ghactions-app"
+}
