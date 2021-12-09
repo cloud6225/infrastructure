@@ -188,12 +188,12 @@ resource "aws_security_group" "loadbalancer_sg" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
-  ingress {
-    from_port   = 80
-    to_port     = 80
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
+  // ingress {
+  //   from_port   = 80
+  //   to_port     = 80
+  //   protocol    = "tcp"
+  //   cidr_blocks = ["0.0.0.0/0"]
+  // }
 
   ingress{
     from_port   = 22
@@ -248,6 +248,25 @@ resource "aws_db_parameter_group" "parameter_group" {
   family = "postgres13"
 }
 
+data "aws_acm_certificate" "certificate" {
+  domain   = "prod.mrudulladhwe.me"
+  statuses = ["ISSUED"]
+}
+
+#customer managed key for rds
+resource "aws_kms_key" "rdskey" {
+  description              = "KMS key 1"
+  customer_master_key_spec = "SYMMETRIC_DEFAULT"
+  is_enabled               = true
+  enable_key_rotation      = true
+  deletion_window_in_days  = 10
+}
+
+resource "aws_kms_alias" "keyaliasrds" {
+  name          = "alias/rdskey"
+  target_key_id = aws_kms_key.rdskey.key_id
+}
+
 #creating RDS instance
 resource "aws_db_instance" "rds_instance" {
   allocated_storage      = 10
@@ -262,6 +281,8 @@ resource "aws_db_instance" "rds_instance" {
   db_subnet_group_name   = aws_db_subnet_group.subnet_group.name
   parameter_group_name   = var.db_pg
   publicly_accessible    = false
+  storage_encrypted      = true
+  kms_key_id             = aws_kms_key.rdskey.arn
   skip_final_snapshot    = true
   vpc_security_group_ids = [aws_security_group.database.id]
   backup_retention_period= 5
@@ -382,21 +403,90 @@ resource "aws_iam_instance_profile" "profile" {
   role = aws_iam_role.role.name
 }
 
-#creating ec2 instance
-// resource "aws_instance" "ec2_instance" {
-//   ami                     = data.aws_ami.example_ami.id
-//   instance_type           = "t2.micro"
-//   iam_instance_profile    = aws_iam_instance_profile.profile.name
-//   vpc_security_group_ids  = [aws_security_group.application.id]
-//   depends_on              = [aws_db_instance.rds_instance]
-//   disable_api_termination = false
-//   subnet_id               = aws_subnet.public_subnet[0].id
-//   key_name                = var.ec2_key
-//   root_block_device {
-//     delete_on_termination = true
-//     volume_size           = 20
-//     volume_type           = "gp2"
-//   }
+resource "aws_kms_key" "customerkey" {
+  description              = "customerkey"
+  policy = <<EOF
+{
+    "Version": "2012-10-17",
+    "Id": "key-default-1",
+    "Statement": [
+        {
+            "Sid": "Enable IAM User Permissions",
+            "Effect": "Allow",
+            "Principal": {
+                "AWS": [
+                    "arn:aws:iam::${var.prod_acc}:root",
+                    "arn:aws:iam::${var.prod_acc}:user/ghactions-app"
+                ]
+            },
+            "Action": "kms:*",
+            "Resource": "*"
+        },
+        {
+            "Sid": "Allow service-linked role use of the customer managed key",
+            "Effect": "Allow",
+            "Principal": {
+                "AWS": "arn:aws:iam::${var.prod_acc}:role/aws-service-role/autoscaling.amazonaws.com/AWSServiceRoleForAutoScaling"
+            },
+            "Action": [
+                "kms:Encrypt",
+                "kms:Decrypt",
+                "kms:ReEncrypt*",
+                "kms:GenerateDataKey*",
+                "kms:DescribeKey"
+            ],
+            "Resource": "*"
+        },
+        {
+            "Sid": "Allow attachment of persistent resources",
+            "Effect": "Allow",
+            "Principal": {
+                "AWS": "arn:aws:iam::${var.prod_acc}:role/aws-service-role/autoscaling.amazonaws.com/AWSServiceRoleForAutoScaling"
+            },
+            "Action": "kms:CreateGrant",
+            "Resource": "*",
+            "Condition": {
+                "Bool": {
+                    "kms:GrantIsForAWSResource": "true"
+                }
+            }
+        }
+    ]
+}
+EOF
+}
+
+resource "aws_kms_alias" "keyalias" {
+  name          = "alias/customerkey"
+  target_key_id = aws_kms_key.customerkey.key_id
+}
+
+data "template_file" "config_userdata" {
+  template = <<-EOF
+    #! /bin/bash
+    echo export POSTGRES_USER="${var.postgres_username}" >> /etc/environment
+    echo export POSTGRES_PASSWORD="${var.rds_password}" >> /etc/environment
+    echo export POSTGRES_HOST="${aws_db_instance.rds_instance.address}" >> /etc/environment
+    echo export POSTGRES_DB="${var.rds_name}" >> /etc/environment
+    echo export AWS_S3_BUCKET_NAME="${aws_s3_bucket.bucket.bucket}" >> /etc/environment
+    echo export POSTGRES_PORT="${var.port}" >> /etc/environment
+    echo export AWS_REGION_NAME="${var.region}" >> /etc/environment
+    echo export AWS_SNS_TOPIC="${var.snstopic}" >> /etc/environment 
+    echo export DB_HOST_REPLICA="${aws_db_instance.rds_replica.address}" >> /etc/environment
+    EOF
+}
+
+resource "aws_ebs_default_kms_key" "ebskmskey" {
+  key_arn = aws_kms_key.customerkey.arn
+}
+
+#launching configuration with auto-scaling group
+// resource "aws_launch_configuration" "as_conf" {
+//   name = "asg_launch_config"
+//   image_id      = data.aws_ami.example_ami.id
+//   instance_type = "t2.micro"
+//   key_name      = var.ec2_key
+//   associate_public_ip_address = true
 //   user_data = <<-EOF
 //   #! /bin/bash
 //   echo export POSTGRES_USER="${var.postgres_username}" >> /etc/environment
@@ -406,45 +496,58 @@ resource "aws_iam_instance_profile" "profile" {
 //   echo export AWS_S3_BUCKET_NAME="${aws_s3_bucket.bucket.bucket}" >> /etc/environment
 //   echo export POSTGRES_PORT="${var.port}" >> /etc/environment
 //   echo export AWS_REGION_NAME="${var.region}" >> /etc/environment
- 
+//   echo export AWS_SNS_TOPIC="${var.snstopic}" >> /etc/environment 
+//   echo export DB_HOST_REPLICA="${aws_db_instance.rds_replica.address}" >> /etc/environment
 //   EOF
 
-//   tags = {
-//     Name = "MyEC2Instance"
+//   iam_instance_profile = aws_iam_instance_profile.profile.name
+//   security_groups = [aws_security_group.application.id]
+
+//   root_block_device {
+//     delete_on_termination = true
+//     volume_size           = 20
+//     volume_type           = "gp2"
 //   }
+
+//   depends_on              = [aws_db_instance.rds_instance, aws_s3_bucket.bucket]
 // }
 
 
-#launching configuration with auto-scaling group
-resource "aws_launch_configuration" "as_conf" {
-  name = "asg_launch_config"
-  image_id      = data.aws_ami.example_ami.id
-  instance_type = "t2.micro"
-  key_name      = var.ec2_key
-  associate_public_ip_address = true
-  user_data = <<-EOF
-  #! /bin/bash
-  echo export POSTGRES_USER="${var.postgres_username}" >> /etc/environment
-  echo export POSTGRES_PASSWORD="${var.rds_password}" >> /etc/environment
-  echo export POSTGRES_HOST="${aws_db_instance.rds_instance.address}" >> /etc/environment
-  echo export POSTGRES_DB="${var.rds_name}" >> /etc/environment
-  echo export AWS_S3_BUCKET_NAME="${aws_s3_bucket.bucket.bucket}" >> /etc/environment
-  echo export POSTGRES_PORT="${var.port}" >> /etc/environment
-  echo export AWS_REGION_NAME="${var.region}" >> /etc/environment
-  echo export AWS_SNS_TOPIC="${var.snstopic}" >> /etc/environment 
-  echo export DB_HOST_REPLICA="${aws_db_instance.rds_replica.address}" >> /etc/environment
-  EOF
 
-  iam_instance_profile = aws_iam_instance_profile.profile.name
-  security_groups = [aws_security_group.application.id]
+resource "aws_launch_template" "as_conf" {
+  name = "as_conf"
 
-  root_block_device {
-    delete_on_termination = true
-    volume_size           = 20
-    volume_type           = "gp2"
+  block_device_mappings {
+    device_name = "/dev/sda1"
+
+    ebs {
+	  delete_on_termination = true
+      volume_size 			= 20
+      volume_type           = "gp2"
+      encrypted = true
+      kms_key_id = aws_kms_key.customerkey.arn
+    }
   }
 
-  depends_on              = [aws_db_instance.rds_instance, aws_s3_bucket.bucket]
+  iam_instance_profile {
+    name = aws_iam_instance_profile.profile.name
+  }
+
+  image_id = data.aws_ami.example_ami.id
+  instance_type = "t2.micro"
+  key_name = var.ec2_key
+  vpc_security_group_ids = [aws_security_group.application.id]
+
+  tag_specifications {
+    resource_type = "instance"
+
+    tags = {
+      Name = "webapp launch template"
+    }
+  }
+  
+  depends_on           = [aws_db_instance.rds_instance, aws_s3_bucket.bucket]
+  user_data            = base64encode(data.template_file.config_userdata.rendered)
 }
 
 resource "aws_lb" "load_balancing" {
@@ -484,8 +587,9 @@ resource "aws_lb_target_group" "target_grp" {
 
 resource "aws_lb_listener" "webapp_listener" {
   load_balancer_arn = aws_lb.load_balancing.arn
-  port              = "80"
-  protocol          = "HTTP"
+  port              = "443"
+  protocol          = "HTTPS"
+  certificate_arn   = "arn:aws:acm:us-east-1:695302741031:certificate/a89344a4-2057-4937-8923-4c06c5683e25"
 
   default_action {
     type             = "forward"
@@ -496,12 +600,17 @@ resource "aws_lb_listener" "webapp_listener" {
 resource "aws_autoscaling_group" "autoscaling_group" {
   name                 = "autoscalingGrp"
   default_cooldown     = 60
-  launch_configuration = aws_launch_configuration.as_conf.name
+  //launch_configuration = aws_launch_configuration.as_conf.name
   min_size             = 3
   max_size             = 5
   desired_capacity     = 3
   vpc_zone_identifier  = [aws_subnet.public_subnet[0].id]
   target_group_arns    = [aws_lb_target_group.target_grp.arn]
+
+  launch_template {
+    id      = aws_launch_template.as_conf.id
+    version = aws_launch_template.as_conf.latest_version
+  }
 
   tag {
     key                 = "Name"
